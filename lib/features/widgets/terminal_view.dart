@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:mechanix_terminal/core/utils/constants.dart';
 import 'package:mechanix_terminal/features/data/settings.dart';
 import 'package:mechanix_terminal/features/widgets/terminal_painter.dart';
+import 'package:mechanix_terminal/main.dart';
 import 'package:mechanix_terminal/src/rust/api/simple.dart';
 import 'package:mechanix_terminal/src/rust/terminal.dart';
 
@@ -31,10 +32,19 @@ class TerminalView extends StatefulWidget {
 }
 
 class _TerminalViewState extends State<TerminalView>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver, RouteAware
+    implements TextInputClient {
   TerminalFrame? _frame;
   StreamSubscription? _subscription;
   final FocusNode _focusNode = FocusNode();
+  @visibleForTesting
+  bool get hasFocus => _focusNode.hasFocus;
+  TextInputConnection? _textInputConnection;
+  static const _initialEditingValue = TextEditingValue(
+    text: ' ',
+    selection: TextSelection.collapsed(offset: 1),
+  );
+  TextEditingValue _editingValue = _initialEditingValue;
 
   // Estimate height per line dynamically based on font size
   double get _lineHeight => widget.settings.fontSize * 1.3;
@@ -49,8 +59,36 @@ class _TerminalViewState extends State<TerminalView>
   bool get wantKeepAlive => true;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null) {
+      routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didPushNext() {
+    // Navigating away from terminal: immediately release focus & dismiss keyboard
+    if (_focusNode.hasFocus) {
+      _focusNode.unfocus();
+    }
+    _closeTextInput();
+  }
+
+  @override
+  void didPopNext() {
+    // Navigating back to terminal: restore focus & keyboard on active tab
+    if (mounted && widget.tabController.index == widget.index) {
+      _activateTerminal();
+    }
+  }
+
+  @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _focusNode.addListener(_onFocusChange);
     widget.tabController.addListener(_handleTabChange);
 
     if (widget.tabController.index == widget.index) {
@@ -79,21 +117,67 @@ class _TerminalViewState extends State<TerminalView>
 
       if (widget.tabController.index == widget.index) {
         _activateTerminal();
+      } else {
+        if (_focusNode.hasFocus) {
+          _focusNode.unfocus();
+        }
+        _closeTextInput();
       }
+    } else if (widget.tabController.index == widget.index &&
+        _focusNode.hasFocus) {
+      _showTextInput();
     }
   }
 
   @override
   void dispose() {
-    widget.tabController.removeListener(_handleTabChange);
+    routeObserver.unsubscribe(this);
+    WidgetsBinding.instance.removeObserver(this);
+    _focusNode.removeListener(_onFocusChange);
+    try {
+      widget.tabController.removeListener(_handleTabChange);
+    } catch (_) {}
+    _closeTextInput();
     _subscription?.cancel();
     _focusNode.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    if (state == AppLifecycleState.resumed) {
+      final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
+      if (isCurrentRoute && widget.tabController.index == widget.index) {
+        _activateTerminal();
+      }
+    } else {
+      if (_focusNode.hasFocus) {
+        _focusNode.unfocus();
+      }
+      _closeTextInput();
+    }
+  }
+
+  void _onFocusChange() {
+    if (!mounted) return;
+
+    if (_focusNode.hasFocus) {
+      setActiveTerminal(id: widget.terminalId);
+      _showTextInput();
+    } else {
+      _closeTextInput();
+    }
+  }
+
   void _handleTabChange() {
     if (widget.tabController.index == widget.index) {
       _activateTerminal();
+    } else {
+      if (_focusNode.hasFocus) {
+        _focusNode.unfocus();
+      }
+      _closeTextInput();
     }
   }
 
@@ -102,12 +186,143 @@ class _TerminalViewState extends State<TerminalView>
 
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_focusNode.hasFocus) {
-          _focusNode.requestFocus();
+        if (mounted) {
+          final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
+          final isActiveTab = widget.tabController.index == widget.index;
+          if (isCurrentRoute && isActiveTab) {
+            if (!_focusNode.hasFocus) {
+              _focusNode.requestFocus();
+            } else {
+              _showTextInput();
+            }
+          }
         }
       });
     }
   }
+
+  // ── TEXT INPUT & ON-SCREEN KEYBOARD HANDLING ──────────────────────────────
+  void _attachTextInput() {
+    if (_textInputConnection == null || !_textInputConnection!.attached) {
+      _textInputConnection = TextInput.attach(
+        this,
+        const TextInputConfiguration(
+          inputType: TextInputType.text,
+          inputAction: TextInputAction.unspecified,
+          autocorrect: false,
+          enableSuggestions: false,
+          keyboardAppearance: Brightness.dark,
+          enableIMEPersonalizedLearning: false,
+        ),
+      );
+      _resetEditingValue();
+    }
+  }
+
+  void _showTextInput() {
+    _attachTextInput();
+    _resetEditingValue();
+    _textInputConnection?.show();
+  }
+
+  void _closeTextInput() {
+    if (_textInputConnection?.attached ?? false) {
+      _textInputConnection?.close();
+    }
+    _textInputConnection = null;
+  }
+
+  void _resetEditingValue() {
+    _editingValue = _initialEditingValue;
+    _textInputConnection?.setEditingState(_initialEditingValue);
+  }
+
+  @override
+  TextEditingValue? get currentTextEditingValue => _editingValue;
+
+  @override
+  AutofillScope? get currentAutofillScope => null;
+
+  @override
+  void updateEditingValue(TextEditingValue value) {
+    if (value.text == _editingValue.text) {
+      return;
+    }
+
+    if (value.text.isEmpty || value.text.length < _editingValue.text.length) {
+      sendInput(id: widget.terminalId, input: '\x7f');
+    } else {
+      String newText;
+      if (_editingValue.text.isNotEmpty &&
+          value.text.startsWith(_editingValue.text)) {
+        newText = value.text.substring(_editingValue.text.length);
+      } else if (_editingValue.text.isNotEmpty &&
+          value.text.endsWith(_editingValue.text)) {
+        newText = value.text.substring(
+          0,
+          value.text.length - _editingValue.text.length,
+        );
+      } else {
+        newText = value.text.replaceAll(' ', '');
+        if (newText.isEmpty && value.text.isNotEmpty) {
+          newText = value.text;
+        }
+      }
+
+      if (newText.isNotEmpty) {
+        final formatted = newText
+            .replaceAll('\r\n', '\r')
+            .replaceAll('\n', '\r');
+        sendInput(id: widget.terminalId, input: formatted);
+      }
+    }
+
+    _resetEditingValue();
+  }
+
+  @override
+  void performAction(TextInputAction action) {
+    sendInput(id: widget.terminalId, input: '\r');
+    _resetEditingValue();
+  }
+
+  @override
+  void updateFloatingCursor(RawFloatingCursorPoint point) {}
+
+  @override
+  void showAutocorrectionPromptRect(int start, int end) {}
+
+  @override
+  void connectionClosed() {
+    _textInputConnection = null;
+  }
+
+  @override
+  void performPrivateCommand(String action, Map<String, dynamic> data) {}
+
+  @override
+  void showToolbar() {}
+
+  @override
+  void insertContent(KeyboardInsertedContent content) {}
+
+  @override
+  void insertTextPlaceholder(ui.Size size) {}
+
+  @override
+  void removeTextPlaceholder() {}
+
+  @override
+  void didChangeInputControl(
+    TextInputControl? oldControl,
+    TextInputControl? newControl,
+  ) {}
+
+  @override
+  bool onFocusReceived() => true;
+
+  @override
+  void performSelector(String selectorName) {}
 
   /// Converts a Flutter KeyEvent into terminal strings or history sequences.
   String? _keyEventToTerminalInput(KeyEvent event) {
@@ -150,13 +365,6 @@ class _TerminalViewState extends State<TerminalView>
     final defaultValue = defaultMappings[key];
     if (defaultValue != null) {
       return defaultValue;
-    }
-
-    if (event is KeyDownEvent || event is KeyRepeatEvent) {
-      final character = event.character;
-      if (character != null && character.isNotEmpty) {
-        return character;
-      }
     }
 
     return null;
@@ -272,6 +480,7 @@ class _TerminalViewState extends State<TerminalView>
         }
 
         return Listener(
+          behavior: HitTestBehavior.opaque,
           // ── Mouse-wheel scrolling ──────────────────────────────────────────────
           onPointerSignal: (pointerSignal) {
             if (pointerSignal is PointerScrollEvent) {
@@ -285,10 +494,16 @@ class _TerminalViewState extends State<TerminalView>
               }
             }
           },
-          // ── Left-button down: start selection ─────────────────────────────────
+          // ── Left-button / Touch down: start selection & request focus ─────────
           onPointerDown: (event) {
-            if (event.buttons == kPrimaryMouseButton) {
-              _focusNode.requestFocus();
+            final isPrimary =
+                event.buttons == kPrimaryMouseButton ||
+                event.kind == PointerDeviceKind.touch;
+            if (isPrimary) {
+              if (!_focusNode.hasFocus) {
+                _focusNode.requestFocus();
+              }
+              _showTextInput();
               final cell = _pixelToCell(
                 event.localPosition,
                 charWidth,
@@ -301,9 +516,12 @@ class _TerminalViewState extends State<TerminalView>
               });
             }
           },
-          // ── Left-button drag: extend selection ────────────────────────────────
+          // ── Left-button / Touch drag: extend selection ────────────────────────
           onPointerMove: (event) {
-            if (_isSelecting && event.buttons == kPrimaryMouseButton) {
+            final isPrimary =
+                event.buttons == kPrimaryMouseButton ||
+                event.kind == PointerDeviceKind.touch;
+            if (_isSelecting && isPrimary) {
               final cell = _pixelToCell(
                 event.localPosition,
                 charWidth,
@@ -314,17 +532,30 @@ class _TerminalViewState extends State<TerminalView>
               });
             }
           },
-          // ── Left-button up: finish & copy ─────────────────────────────────────
+          // ── Left-button / Touch up: finish & copy ─────────────────────────────
           onPointerUp: (event) {
             if (_isSelecting) {
+              final isSingleTap =
+                  _selectionStart != null &&
+                  _selectionEnd != null &&
+                  _selectionStart!.col == _selectionEnd!.col &&
+                  _selectionStart!.row == _selectionEnd!.row;
+
               setState(() {
                 _isSelecting = false;
+                if (isSingleTap) {
+                  _selectionStart = null;
+                  _selectionEnd = null;
+                }
               });
-              final frame = _frame;
-              if (frame != null) {
-                final text = _extractSelection(frame);
-                if (text.trim().isNotEmpty) {
-                  Clipboard.setData(ClipboardData(text: text));
+
+              if (!isSingleTap) {
+                final frame = _frame;
+                if (frame != null) {
+                  final text = _extractSelection(frame);
+                  if (text.trim().isNotEmpty) {
+                    Clipboard.setData(ClipboardData(text: text));
+                  }
                 }
               }
             }
@@ -344,7 +575,6 @@ class _TerminalViewState extends State<TerminalView>
               },
               child: Focus(
                 focusNode: _focusNode,
-                autofocus: true,
                 onKeyEvent: (FocusNode node, KeyEvent event) {
                   if (event is KeyDownEvent || event is KeyRepeatEvent) {
                     final key = event.logicalKey;

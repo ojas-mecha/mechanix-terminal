@@ -147,6 +147,7 @@ class _TerminalTabsState extends State<TerminalTabs>
             constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
             icon: const Icon(Icons.settings),
             onPressed: () {
+              FocusScope.of(context).unfocus();
               Navigator.push(
                 context,
                 MaterialPageRoute(
@@ -168,6 +169,7 @@ class _TerminalTabsState extends State<TerminalTabs>
         physics: const NeverScrollableScrollPhysics(),
         children: _terminalIds.asMap().entries.map((entry) {
           return TerminalView(
+            key: ValueKey<int>(entry.value),
             terminalId: entry.value,
             settings: widget.settings,
             tabController: _tabController!,

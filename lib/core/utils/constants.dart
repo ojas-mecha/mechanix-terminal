@@ -243,6 +243,7 @@ final Map<LogicalKeyboardKey, String> shiftMappings = {
 
 final Map<LogicalKeyboardKey, String> defaultMappings = {
   LogicalKeyboardKey.enter: '\r',
+  LogicalKeyboardKey.numpadEnter: '\r',
   LogicalKeyboardKey.backspace: '\x7f',
   LogicalKeyboardKey.tab: '\t',
   LogicalKeyboardKey.escape: '\x1b',

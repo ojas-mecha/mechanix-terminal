@@ -14,6 +14,8 @@ import 'package:show_fps/show_fps.dart';
 
 Stream<int>? _terminalStream;
 late SettingsRepository settingsRepository;
+final RouteObserver<ModalRoute<void>> routeObserver =
+    RouteObserver<ModalRoute<void>>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -74,6 +76,7 @@ class _MyAppState extends State<MyApp> {
       themeMode: themeMode,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
+      navigatorObservers: [routeObserver],
       debugShowCheckedModeBanner: false,
       home: TerminalTabs(
         settings: _settings,
